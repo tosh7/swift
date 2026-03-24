@@ -705,6 +705,9 @@ bool MissingConformanceFailure::diagnoseAsError() {
     return true;
   }
 
+  if (diagnoseOptionalExistentialAsUnwrap())
+    return true;
+
   if (diagnoseTypeCannotConform(nonConformingType, protocolType))
     return true;
 
@@ -778,6 +781,90 @@ bool MissingConformanceFailure::diagnoseTypeCannotConform(
   } else {
     emitDiagnosticAt(noteLocation, diag::required_by_decl,
                      AffectedDecl, req.getFirstType(), nonConformingType);
+  }
+
+  return true;
+}
+
+bool MissingConformanceFailure::diagnoseOptionalExistentialAsUnwrap() {
+  auto nonConformingType = getLHS();
+  auto protocolType = getRHS();
+
+  // (1) nonConformingType must be an existential type (e.g., "any P")
+  if (!nonConformingType->isExistentialType())
+    return false;
+
+  // (2) Get the argument expression from the anchor
+  auto *argExpr = getAsExpr(getAnchor());
+  if (!argExpr)
+    return false;
+
+  // (3) The argument's actual type must be Optional<nonConformingType>
+  auto argType = getType(argExpr);
+  if (!argType)
+    return false;
+
+  auto innerType = argType->getOptionalObjectType();
+  if (!innerType)
+    return false;
+
+  // (4) The unwrapped type must be the same existential that failed conformance
+  if (!innerType->isEqual(nonConformingType))
+    return false;
+
+  // (5) Verify the existential's protocol constraints include the required protocol
+  auto *requiredProto = protocolType->getAs<ProtocolType>();
+  if (!requiredProto)
+    return false;
+
+  auto layout = nonConformingType->getExistentialLayout();
+  bool protocolSatisfied = false;
+  for (auto *proto : layout.getProtocols()) {
+    if (proto == requiredProto->getDecl()) {
+      protocolSatisfied = true;
+      break;
+    }
+  }
+  if (!protocolSatisfied)
+    return false;
+
+  // (6) Emit the "must be unwrapped" error using existing diagnostic
+  emitDiagnosticAt(argExpr->getLoc(), diag::optional_not_unwrapped,
+                   argType, nonConformingType);
+
+  // (7) Emit fix-it notes: ?? default value and ! force-unwrap
+  {
+    auto defaultDiag = emitDiagnosticAt(argExpr->getLoc(),
+                                         diag::unwrap_with_default_value);
+    bool needsParensInside =
+        exprNeedsParensBeforeAddingNilCoalescing(getDC(),
+                                                 const_cast<Expr *>(argExpr));
+    bool needsParensOutside =
+        exprNeedsParensAfterAddingNilCoalescing(
+            getDC(), const_cast<Expr *>(argExpr),
+            [&](auto *E) { return findParentExpr(E); });
+
+    llvm::SmallString<2> insertBefore;
+    llvm::SmallString<32> insertAfter;
+    if (needsParensOutside)
+      insertBefore += "(";
+    if (needsParensInside) {
+      insertBefore += "(";
+      insertAfter += ")";
+    }
+    insertAfter += " ?? <#default value#>";
+    if (needsParensOutside)
+      insertAfter += ")";
+
+    if (!insertBefore.empty())
+      defaultDiag.fixItInsert(argExpr->getStartLoc(), insertBefore);
+    defaultDiag.fixItInsertAfter(argExpr->getEndLoc(), insertAfter);
+  }
+
+  {
+    auto forceDiag = emitDiagnosticAt(argExpr->getLoc(),
+                                       diag::unwrap_with_force_value);
+    forceDiag.fixItInsertAfter(argExpr->getEndLoc(), "!");
   }
 
   return true;

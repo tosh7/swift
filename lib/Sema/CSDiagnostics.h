@@ -367,6 +367,11 @@ protected:
   /// add a conformance from one library type to another.
   bool diagnoseAsAmbiguousOperatorRef();
 
+  /// When the non-conforming type is an existential (any P) and the
+  /// argument expression has Optional type wrapping that existential,
+  /// emit an unwrap diagnostic instead of "type cannot conform".
+  bool diagnoseOptionalExistentialAsUnwrap();
+
   DiagOnDecl getDiagnosticOnDecl() const override {
     return (getRequirement().getKind() == RequirementKind::Layout ?
             diag::type_does_not_conform_anyobject_decl_owner :
